@@ -1,0 +1,32 @@
+# 저장 위치: <저장소>/.github/workflows/briefing.yml
+name: morning-briefing
+
+on:
+  schedule:
+    - cron: "0 0 * * 1-5"   # 00:00 UTC = 한국시간 평일 09:00 (GitHub 사정으로 수~수십 분 지연될 수 있음)
+  workflow_dispatch:         # Actions 탭의 수동 실행 버튼
+
+permissions:
+  contents: write            # docs/data.json을 저장소에 커밋하기 위해 필요
+
+jobs:
+  briefing:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install yfinance requests
+      - name: 브리핑 생성 + 푸시 + data.json 저장
+        run: python briefing.py
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          DATA_GO_KR_KEY: ${{ secrets.DATA_GO_KR_KEY }}        # 선택
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}  # 선택
+      - name: data.json 커밋
+        run: |
+          git config user.name "briefing-bot"
+          git config user.email "briefing-bot@users.noreply.github.com"
+          git add docs/data.json
+          git diff --cached --quiet || (git commit -m "update data.json" && git push)
