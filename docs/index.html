@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>아침 시장 브리핑</title>
+<style>
+:root{
+  box-sizing:border-box;
+  padding-top:env(safe-area-inset-top,0px);
+  padding-bottom:env(safe-area-inset-bottom,0px);
+  --bg:#f6f7f9;--surface:#fff;--text:#14181f;--muted:#667085;--line:#e3e6eb;
+  --red:#d92d20;--blue:#1d5fd1;--up:var(--red);--dn:var(--blue);
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0e1116;--surface:#161b22;--text:#e8ebf0;--muted:#8b95a5;--line:#262d38;
+    --red:#ff6b5e;--blue:#6aa0ff;color-scheme:dark;
+  }
+}
+:root[data-flip="1"]{--up:var(--blue);--dn:var(--red)}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*,*::before,*::after{box-sizing:inherit}
+body{margin:0;background:var(--bg);color:var(--text);
+  font-family:"Pretendard","Apple SD Gothic Neo","Noto Sans KR","Malgun Gothic",system-ui,sans-serif;
+  line-height:1.5;-webkit-font-smoothing:antialiased}
+main{max-width:720px;margin:0 auto;padding:20px 16px 48px}
+header{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;margin-bottom:20px}
+h1{font-size:22px;margin:0;letter-spacing:-.02em}
+.sub{color:var(--muted);font-size:13px;margin-top:2px}
+button{font:inherit;font-size:12px;color:var(--text);background:var(--surface);
+  border:1px solid var(--line);border-radius:6px;padding:6px 10px;cursor:pointer}
+button:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.brief{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin-bottom:24px}
+.brief h2{font-size:15px;margin:0 0 10px}
+.brief ul{margin:0;padding-left:18px}
+.brief li{margin:0 0 8px;font-size:14.5px;max-width:62ch}
+.brief li:last-child{margin-bottom:0}
+section{margin-bottom:22px}
+h3{font-size:13px;color:var(--muted);font-weight:600;margin:0 0 4px;padding:0 2px}
+.rows{background:var(--surface);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.row{display:grid;grid-template-columns:1fr auto 84px;gap:4px 12px;align-items:center;
+  padding:11px 14px;border-top:1px solid var(--line)}
+.row:first-child{border-top:0}
+.name{font-size:14.5px;font-weight:600}
+.tag{grid-column:1;font-size:11.5px;color:var(--muted);margin-top:-2px}
+.val{font-variant-numeric:tabular-nums;font-size:16px;text-align:right;font-weight:600}
+.chg{font-variant-numeric:tabular-nums;font-size:13.5px;text-align:right;font-weight:600}
+.rng{grid-column:1 / 4;margin-top:8px}
+.track{position:relative;height:4px;background:var(--line);border-radius:2px}
+.dot{position:absolute;top:50%;width:8px;height:8px;margin:-6px 0 0 -6px;border-radius:50%;background:var(--text);border:2px solid var(--surface)}
+.ends{display:flex;justify-content:space-between;gap:6px;font-size:11px;color:var(--muted);margin-top:6px;font-variant-numeric:tabular-nums}
+.none{font-size:11px;color:var(--muted)}
+.u{color:var(--up)}.d{color:var(--dn)}
+.note{font-size:12px;color:var(--muted);margin-top:18px;max-width:62ch}
+.err{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px 18px;font-size:14px}
+@media (max-width:380px){.row{grid-template-columns:1fr auto 72px}}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>아침 시장 브리핑</h1>
+      <div class="sub" id="sub">불러오는 중…</div>
+    </div>
+    <button id="flip" type="button" aria-pressed="false">상승 색: 빨강</button>
+  </header>
+  <div id="brief"></div>
+  <div id="groups"></div>
+  <p class="note">장이 열려 있는 항목은 조회 시점 값(지연 시세), 마감된 항목은 가장 최근 정규장 종가이며 각 줄에 기준일을 표시합니다. 선 위의 점은 52주 최저(왼쪽 끝)와 최고(오른쪽 끝) 사이의 현재 위치입니다. 정보 제공용이며 투자 권유가 아닙니다.</p>
+</main>
+
+<script>
+var NAMES={"미 10년물(%)":"미 10년물","미 2년물(%)":"미 2년물","WTI($)":"WTI",
+  "국제 금($/oz)":"국제 금 현물","KRX 금(원/g)":"KRX 금 (1g)"};
+
+function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;")}
+function fmtN(x,d){return x.toLocaleString("ko-KR",{minimumFractionDigits:d,maximumFractionDigits:d})}
+function isYield(n){return n.indexOf("(%)")>-1}
+function affix(n){
+  if(isYield(n))return["","%"];
+  if(n.indexOf("WTI")===0||n.indexOf("국제 금")===0)return["$",""];
+  if(n.indexOf("KRX")===0)return["","원"];
+  return["",""];
+}
+function dec(it){return isYield(it.name)?2:it.decimals}
+
+function rangeHtml(it){
+  if(it.lo==null||it.hi==null||!(it.hi>it.lo))
+    return '<div class="rng none">52주 범위 데이터 없음</div>';
+  var p=Math.max(0,Math.min(1,(it.value-it.lo)/(it.hi-it.lo)));
+  var a=affix(it.name),d=dec(it);
+  return '<div class="rng"><div class="track"><span class="dot" style="left:'+(p*100).toFixed(1)+'%"></span></div>'
+    +'<div class="ends"><span>최저 '+a[0]+fmtN(it.lo,d)+a[1]+'</span><span>'+Math.round(p*100)+'% 지점</span>'
+    +'<span>최고 '+a[0]+fmtN(it.hi,d)+a[1]+'</span></div></div>';
+}
+
+function render(data){
+  var g=String(data.generated_kst||"").replace("T"," ");
+  document.getElementById("sub").textContent="생성 "+g+" KST";
+
+  var pts=String(data.points||"").split("\n").map(function(l){
+    return l.replace(/^\s*\d+[.)]\s*/,"").trim();
+  }).filter(Boolean);
+  document.getElementById("brief").innerHTML=pts.length
+    ?'<div class="brief"><h2>오늘의 핵심 포인트</h2><ul>'+pts.map(function(p){return"<li>"+esc(p)+"</li>"}).join("")+"</ul></div>":"";
+
+  var order=[],by={};
+  (data.items||[]).forEach(function(it){
+    if(!by[it.section]){by[it.section]=[];order.push(it.section)}
+    by[it.section].push(it);
+  });
+  var out="";
+  order.forEach(function(sec){
+    out+='<section><h3>'+esc(sec)+'</h3><div class="rows">';
+    by[sec].forEach(function(it){
+      var a=affix(it.name),d=dec(it),chg,cls;
+      if(isYield(it.name)){
+        var bp=Math.round((it.value-it.prev)*100);
+        cls=bp>0?"u":(bp<0?"d":"");chg=(bp>0?"+":"")+bp+"bp";
+      }else{
+        cls=it.chg_pct>0?"u":(it.chg_pct<0?"d":"");
+        chg=(it.chg_pct>0?"+":"")+it.chg_pct.toFixed(2)+"%";
+      }
+      var dt=String(it.date).slice(5).replace("-","/");
+      out+='<div class="row"><span class="name">'+esc(NAMES[it.name]||it.name)+'</span>'
+        +'<span class="val">'+esc(a[0]+fmtN(it.value,d)+a[1])+'</span>'
+        +'<span class="chg '+cls+'">'+esc(chg)+'</span>'
+        +'<span class="tag">'+esc(it.status+" · "+dt)+'</span>'
+        +rangeHtml(it)+'</div>';
+    });
+    out+='</div></section>';
+  });
+  document.getElementById("groups").innerHTML=out;
+}
+
+fetch("data.json?t="+Date.now()).then(function(r){
+  if(!r.ok)throw new Error("HTTP "+r.status);
+  return r.json();
+}).then(render).catch(function(){
+  document.getElementById("sub").textContent="";
+  document.getElementById("groups").innerHTML=
+    '<div class="err">데이터 파일(data.json)을 불러오지 못했습니다. GitHub의 Actions 탭에서 briefing 작업이 한 번 이상 성공했는지 확인해 주세요.</div>';
+});
+
+var btn=document.getElementById("flip");
+try{if(localStorage.getItem("flip")==="1"){document.documentElement.setAttribute("data-flip","1");
+  btn.textContent="상승 색: 파랑";btn.setAttribute("aria-pressed","true")}}catch(e){}
+btn.addEventListener("click",function(){
+  var root=document.documentElement,on=root.getAttribute("data-flip")==="1";
+  if(on)root.removeAttribute("data-flip");else root.setAttribute("data-flip","1");
+  btn.setAttribute("aria-pressed",String(!on));
+  btn.textContent=on?"상승 색: 빨강":"상승 색: 파랑";
+  try{localStorage.setItem("flip",on?"0":"1")}catch(e){}
+});
+</script>
+</body>
+</html>
