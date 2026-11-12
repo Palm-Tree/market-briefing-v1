@@ -117,6 +117,12 @@ function render(data){
   order.forEach(function(sec){
     out+='<section><h3>'+esc(sec)+'</h3><div class="rows">';
     by[sec].forEach(function(it){
+      if(it.error){
+        out+='<div class="row"><span class="name">'+esc(NAMES[it.name]||it.name)+'</span>'
+          +'<span class="val" style="color:var(--muted);font-size:13px">조회 실패</span><span></span>'
+          +'<span class="tag" style="grid-column:1 / 4">'+esc(it.error)+'</span></div>';
+        return;
+      }
       var a=affix(it.name),d=dec(it),chg,cls;
       if(isYield(it.name)){
         var bp=Math.round((it.value-it.prev)*100);
