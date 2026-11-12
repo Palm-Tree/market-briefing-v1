@@ -97,24 +97,60 @@ def fetch_treasury_2y():
             "lo": min(window), "hi": max(window)}
 
 
-def fetch_krx_gold():
-    """공공데이터포털 금융위원회 일반상품시세정보 - 금 99.99_1Kg 종가(원/g, 전 영업일 기준).
-    ※ 응답 필드(clpr 단위 등)는 처음 한 번 실제 값과 대조해 보세요."""
-    key = os.getenv("DATA_GO_KR_KEY")
-    if not key:
-        raise RuntimeError("DATA_GO_KR_KEY 없음")
-    url = "https://apis.data.go.kr/1160100/service/GetGeneralProductInfoService/getGoldPriceInfo"
+KRX_GOLD_URLS = [
+    "https://apis.data.go.kr/1160100/GetGeneralProductInfoService_V2/getGoldPriceInfo",
+    "https://apis.data.go.kr/1160100/service/GetGeneralProductInfoService/getGoldPriceInfo",
+]
+
+
+def _krx_items(url, key, rows):
     params = {
         "serviceKey": key,
         "resultType": "json",
-        "numOfRows": 400,
+        "numOfRows": rows,
         "pageNo": 1,
         "beginBasDt": (dt.datetime.now(KST) - dt.timedelta(days=365)).strftime("%Y%m%d"),
-        "itmsNm": "금 99.99_1Kg",
     }
     r = requests.get(url, params=params, timeout=TIMEOUT)
-    r.raise_for_status()
-    items = r.json()["response"]["body"]["items"]["item"]
+    try:
+        j = r.json()
+    except ValueError:
+        # 인증 오류 등은 JSON이 아닌 XML/텍스트로 오는 경우가 많다
+        raise RuntimeError(f"HTTP {r.status_code}, JSON 아님: {r.text[:150]!r}")
+    resp = j.get("response", j)
+    header = resp.get("header", {}) if isinstance(resp, dict) else {}
+    code = str(header.get("resultCode", "00"))
+    if code != "00":
+        raise RuntimeError(f"API 오류 {code}: {header.get('resultMsg')}")
+    items = (resp.get("body") or {}).get("items") or {}
+    items = items.get("item", []) if isinstance(items, dict) else items
+    if isinstance(items, dict):  # 결과가 1건이면 리스트가 아니라 dict로 온다
+        items = [items]
+    items = [i for i in items if "99.99_1kg" in str(i.get("itmsNm", "")).lower()]
+    if not items:
+        raise RuntimeError("금 99.99_1Kg 데이터 없음 (승인 대기 중이거나 종목명 불일치)")
+    return items
+
+
+def fetch_krx_gold():
+    """공공데이터포털 금융위원회 일반상품시세정보 - 금 99.99_1Kg 종가(원/g).
+    제공 데이터는 실시간이 아니며 영업일 하루 뒤 오후 1시 이후 갱신된다."""
+    key = os.getenv("DATA_GO_KR_KEY")
+    if not key:
+        raise RuntimeError("DATA_GO_KR_KEY 없음")
+    errors = []
+    for url in KRX_GOLD_URLS:
+        for rows in (800, 100):  # 한 번에 많이 못 받는 경우를 대비해 줄여서 재시도
+            try:
+                items = _krx_items(url, key, rows)
+                break
+            except Exception as e:
+                errors.append(f"{url.split('/')[-2]}/{rows}: {e}")
+                items = None
+        if items:
+            break
+    if not items:
+        raise RuntimeError(" | ".join(errors)[:300])
     items = sorted(items, key=lambda x: x["basDt"], reverse=True)
     value = float(items[0]["clpr"])
     prev = value - float(items[0].get("vs", 0))
@@ -149,7 +185,9 @@ def collect():
                             "status": d["status"], "lo": d.get("lo"), "hi": d.get("hi"),
                             "pos": pos, "decimals": decimals})
         except Exception as e:  # 한 항목 실패가 전체를 막지 않도록
-            line = f"{name}: 조회 실패 ({type(e).__name__})"
+            msg = f"{type(e).__name__}: {str(e)[:200]}"
+            line = f"{name}: 조회 실패 ({msg})"
+            records.append({"section": section, "name": name, "error": msg})
         sections.setdefault(section, []).append(line)
 
     for section, name, ticker, dec in YAHOO_ITEMS:
