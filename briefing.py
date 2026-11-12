@@ -98,6 +98,7 @@ def fetch_treasury_2y():
 
 
 KRX_GOLD_URLS = [
+    "https://apis.data.go.kr/1160100/GetGeneralProductInfoService_V2/getGoldPriceInfo_V2",
     "https://apis.data.go.kr/1160100/GetGeneralProductInfoService_V2/getGoldPriceInfo",
     "https://apis.data.go.kr/1160100/service/GetGeneralProductInfoService/getGoldPriceInfo",
 ]
@@ -117,6 +118,9 @@ def _krx_items(url, key, rows):
     except ValueError:
         # 인증 오류 등은 JSON이 아닌 XML/텍스트로 오는 경우가 많다
         raise RuntimeError(f"HTTP {r.status_code}, JSON 아님: {r.text[:150]!r}")
+    if "OpenAPI_ServiceResponse" in j:  # 키/주소 오류는 이 형태로 온다
+        h = j["OpenAPI_ServiceResponse"].get("cmmMsgHeader", {})
+        raise RuntimeError(f"{h.get('errMsg')} / {h.get('returnAuthMsg')} (코드 {h.get('returnReasonCode')})")
     resp = j.get("response", j)
     header = resp.get("header", {}) if isinstance(resp, dict) else {}
     code = str(header.get("resultCode", "00"))
@@ -145,7 +149,7 @@ def fetch_krx_gold():
                 items = _krx_items(url, key, rows)
                 break
             except Exception as e:
-                errors.append(f"{url.split('/')[-2]}/{rows}: {e}")
+                errors.append(f"{url.split('/')[-1]}/{rows}: {e}")
                 items = None
         if items:
             break
