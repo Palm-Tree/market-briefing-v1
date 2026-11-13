@@ -82,6 +82,7 @@ function fmtN(x,d){return x.toLocaleString("ko-KR",{minimumFractionDigits:d,maxi
 function isYield(n){return n.indexOf("(%)")>-1}
 function affix(n){
   if(isYield(n))return["","%"];
+  if(/^(TIGER|KODEX)/.test(n))return["","원"];
   if(n.indexOf("WTI")===0||n.indexOf("국제 금")===0)return["$",""];
   if(n.indexOf("KRX")===0)return["","원"];
   return["",""];
@@ -127,6 +128,9 @@ function render(data){
       if(isYield(it.name)){
         var bp=Math.round((it.value-it.prev)*100);
         cls=bp>0?"u":(bp<0?"d":"");chg=(bp>0?"+":"")+bp+"bp";
+      }else if(it.name==="공포탐욕지수"){
+        var pt=Math.round(it.value-it.prev);
+        cls=pt>0?"u":(pt<0?"d":"");chg=(pt>0?"+":"")+pt+"pt";
       }else{
         cls=it.chg_pct>0?"u":(it.chg_pct<0?"d":"");
         chg=(it.chg_pct>0?"+":"")+it.chg_pct.toFixed(2)+"%";
@@ -135,7 +139,7 @@ function render(data){
       out+='<div class="row"><span class="name">'+esc(NAMES[it.name]||it.name)+'</span>'
         +'<span class="val">'+esc(a[0]+fmtN(it.value,d)+a[1])+'</span>'
         +'<span class="chg '+cls+'">'+esc(chg)+'</span>'
-        +'<span class="tag">'+esc(it.status+" · "+dt)+'</span>'
+        +'<span class="tag">'+esc(it.status+" · "+dt+(it.extra?" · "+it.extra:""))+'</span>'
         +rangeHtml(it)+'</div>';
     });
     out+='</div></section>';
