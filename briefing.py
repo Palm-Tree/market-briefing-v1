@@ -38,13 +38,21 @@ YAHOO_ITEMS = [
     ("주가지수", "다우존스", "^DJI", 2),
     ("주가지수", "러셀2000", "^RUT", 2),
     ("주가지수", "코스피", "^KS11", 2),
+    ("주가지수", "TIGER 미국S&P500", "360750.KS", 0),
+    ("주가지수", "KODEX 미국S&P500", "379800.KS", 0),
+    ("주가지수", "TIGER 미국나스닥100", "133690.KS", 0),
+    ("주가지수", "KODEX 미국나스닥100", "379810.KS", 0),
     ("주가지수", "VIX", "^VIX", 2),
     ("환율·금리", "원/달러", "KRW=X", 2),
+    ("환율·금리", "원/엔(100엔)", "JPYKRW=X", 2),
     ("환율·금리", "달러 인덱스", "DX-Y.NYB", 2),
     ("환율·금리", "미 10년물(%)", "^TNX", 3),
     ("원자재", "WTI($)", "CL=F", 2),
     ("원자재", "국제 금($/oz)", "GC=F", 2),
 ]
+
+
+SCALE = {"JPYKRW=X": 100}  # 야후는 1엔당 원화 -> 100엔 기준으로 환산
 
 
 def fetch_yahoo(ticker):
@@ -56,6 +64,8 @@ def fetch_yahoo(ticker):
     last, prev = h.iloc[-1], h.iloc[-2]
     value, prev_v = float(last["Close"]), float(prev["Close"])
     lo, hi = float(h["Low"].min()), float(h["High"].max())
+    k = SCALE.get(ticker, 1)
+    value, prev_v, lo, hi = value * k, prev_v * k, lo * k, hi * k
     if ticker == "^TNX" and value > 20:  # 구버전 yfinance는 x10 단위
         value, prev_v, lo, hi = value / 10, prev_v / 10, lo / 10, hi / 10
     last_date = h.index[-1].date()
@@ -164,6 +174,35 @@ def fetch_krx_gold():
             "lo": min(closes), "hi": max(closes)}
 
 
+FG_KO = {"extreme fear": "극단적 공포", "fear": "공포", "neutral": "중립",
+         "greed": "탐욕", "extreme greed": "극단적 탐욕"}
+
+
+def fetch_fear_greed():
+    """CNN 공포탐욕지수(0~100). 비공식 주소라 차단되거나 바뀔 수 있다.
+    52주 범위는 CNN이 주는 과거 데이터에서 최근 1년치로 계산."""
+    url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                             "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+               "Accept": "application/json", "Referer": "https://edition.cnn.com/"}
+    r = requests.get(url, headers=headers, timeout=TIMEOUT)
+    r.raise_for_status()
+    j = r.json()
+    fg = j["fear_and_greed"]
+    value, prev = float(fg["score"]), float(fg["previous_close"])
+    cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=365)).timestamp() * 1000
+    ys = [float(p["y"]) for p in j.get("fear_and_greed_historical", {}).get("data", [])
+          if p.get("x", 0) >= cutoff]
+    lo, hi = (min(ys + [value]), max(ys + [value])) if ys else (0.0, 100.0)
+    try:
+        d = dt.datetime.fromisoformat(str(fg["timestamp"]).replace("Z", "+00:00")).date()
+    except Exception:
+        d = dt.date.today()
+    rating = str(fg.get("rating", "")).lower()
+    return {"value": value, "prev": prev, "date": d, "status": "지수", "lo": lo, "hi": hi,
+            "extra": FG_KO.get(rating, rating)}
+
+
 def fmt(name, d, decimals):
     chg = (d["value"] / d["prev"] - 1) * 100 if d["prev"] else 0.0
     pos = None
@@ -171,6 +210,8 @@ def fmt(name, d, decimals):
         pos = (d["value"] - d["lo"]) / (d["hi"] - d["lo"]) * 100
     line = (f"{name}: {d['value']:,.{decimals}f} ({chg:+.2f}%) "
             f"[{d['status']} {d['date']:%m/%d}]")
+    if d.get("extra"):
+        line += f" {d['extra']}"
     if pos is not None:
         line += f" 52주 {pos:.0f}%"
     return line, chg, pos
@@ -187,7 +228,7 @@ def collect():
             records.append({"section": section, "name": name, "value": d["value"],
                             "prev": d["prev"], "chg_pct": chg, "date": str(d["date"]),
                             "status": d["status"], "lo": d.get("lo"), "hi": d.get("hi"),
-                            "pos": pos, "decimals": decimals})
+                            "pos": pos, "decimals": decimals, "extra": d.get("extra")})
         except Exception as e:  # 한 항목 실패가 전체를 막지 않도록
             msg = f"{type(e).__name__}: {str(e)[:200]}"
             line = f"{name}: 조회 실패 ({msg})"
@@ -196,6 +237,8 @@ def collect():
 
     for section, name, ticker, dec in YAHOO_ITEMS:
         add(section, name, lambda t=ticker: fetch_yahoo(t), dec)
+        if name == "VIX":
+            add(section, "공포탐욕지수", fetch_fear_greed, 0)
         if name == "미 10년물(%)":
             add(section, "미 2년물(%)", fetch_treasury_2y, 3)
     add("원자재", "KRX 금(원/g)", fetch_krx_gold, 0)
