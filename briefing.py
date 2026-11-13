@@ -203,6 +203,53 @@ def fetch_fear_greed():
             "extra": FG_KO.get(rating, rating)}
 
 
+_ECOS_ITEMS = {}
+
+
+def _ecos(path):
+    r = requests.get("https://ecos.bok.or.kr/api/" + path, timeout=TIMEOUT)
+    r.raise_for_status()
+    j = r.json()
+    if "RESULT" in j:  # 오류 응답 (인증키 오류, 데이터 없음 등)
+        raise RuntimeError(f"ECOS {j['RESULT'].get('CODE')}: {j['RESULT'].get('MESSAGE')}")
+    return j
+
+
+def _ecos_item_code(key, tenor):
+    """시장금리(일별, 817Y002) 항목 목록에서 '국고채(2년)' 같은 항목코드를 찾는다."""
+    if not _ECOS_ITEMS:
+        j = _ecos(f"StatisticItemList/{key}/json/kr/1/200/817Y002")
+        for row in j["StatisticItemList"]["row"]:
+            _ECOS_ITEMS.setdefault(row["ITEM_NAME"].replace(" ", ""), row["ITEM_CODE"])
+    for name, code in _ECOS_ITEMS.items():
+        if name.startswith("국고채") and f"({tenor})" in name:
+            return code
+    raise RuntimeError(f"ECOS 항목목록에서 국고채({tenor}) 없음")
+
+
+def fetch_kr_yield(tenor):
+    """한국 국고채 금리 (한국은행 ECOS 817Y002, 일별). tenor: '2년' 또는 '10년'.
+    ECOS는 보통 하루 늦게 반영된다."""
+    key = os.getenv("ECOS_API_KEY")
+    if not key:
+        raise RuntimeError("ECOS_API_KEY 없음")
+    code = _ecos_item_code(key, tenor)
+    today = dt.datetime.now(KST).date()
+    start = (today - dt.timedelta(days=400)).strftime("%Y%m%d")
+    j = _ecos(f"StatisticSearch/{key}/json/kr/1/600/817Y002/D/{start}/{today:%Y%m%d}/{code}")
+    rows = []
+    for row in j["StatisticSearch"]["row"]:
+        try:
+            rows.append((dt.datetime.strptime(row["TIME"], "%Y%m%d").date(), float(row["DATA_VALUE"])))
+        except (ValueError, KeyError):
+            continue
+    rows.sort()
+    cutoff = rows[-1][0] - dt.timedelta(days=365)
+    window = [v for d, v in rows if d >= cutoff]
+    return {"value": rows[-1][1], "prev": rows[-2][1], "date": rows[-1][0], "status": "종가",
+            "lo": min(window), "hi": max(window)}
+
+
 def fmt(name, d, decimals):
     chg = (d["value"] / d["prev"] - 1) * 100 if d["prev"] else 0.0
     pos = None
@@ -241,24 +288,64 @@ def collect():
             add(section, "공포탐욕지수", fetch_fear_greed, 0)
         if name == "미 10년물(%)":
             add(section, "미 2년물(%)", fetch_treasury_2y, 3)
+            add(section, "한국 10년물(%)", lambda: fetch_kr_yield("10년"), 3)
+            add(section, "한국 2년물(%)", lambda: fetch_kr_yield("2년"), 3)
     add("원자재", "KRX 금(원/g)", fetch_krx_gold, 0)
     return sections, changes, records
 
 
-def rule_based_points(ch):
+def rule_based_points(records):
+    """Claude API 키가 없을 때 쓰는 규칙 기반 요약 (최대 5개). 새 항목도 모두 포함."""
+    R = {r["name"]: r for r in records if "error" not in r}
+
+    def pct(n):
+        return f"{R[n]['chg_pct']:+.2f}%"
+
+    def bp(n):
+        return f"{(R[n]['value'] - R[n]['prev']) * 100:+.0f}bp"
+
     pts = []
-    sp, nq = ch.get("S&P500"), ch.get("나스닥 종합")
-    if sp is not None and nq is not None:
-        pts.append(f"미 증시: S&P500 {sp:+.2f}%, 나스닥 {nq:+.2f}%로 "
-                   + ("기술주가 상대적으로 약했습니다." if nq < sp else "기술주가 시장을 앞섰습니다."))
-    if "미 10년물(%)" in ch:
-        pts.append(f"금리: 10년물 전일比 {ch['미 10년물(%)']:+.2f}% 변동, 달러인덱스 {ch.get('달러 인덱스', 0):+.2f}%.")
-    if "WTI($)" in ch or "국제 금($/oz)" in ch:
-        pts.append(f"원자재: WTI {ch.get('WTI($)', 0):+.2f}%, 금 {ch.get('국제 금($/oz)', 0):+.2f}%.")
-    if "코스피" in ch or "원/달러" in ch:
-        pts.append(f"한국: 코스피 {ch.get('코스피', 0):+.2f}%, 원/달러 {ch.get('원/달러', 0):+.2f}%.")
-    if "VIX" in ch:
-        pts.append(f"변동성: VIX 전일比 {ch['VIX']:+.2f}%.")
+    if "S&P500" in R and "나스닥 종합" in R:
+        t = f"미 증시: S&P500 {pct('S&P500')}, 나스닥 {pct('나스닥 종합')}로 " + (
+            "기술주가 상대적으로 약했습니다." if R["나스닥 종합"]["chg_pct"] < R["S&P500"]["chg_pct"]
+            else "기술주가 시장을 앞섰습니다.")
+        etfs = [n for n in ("TIGER 미국S&P500", "KODEX 미국S&P500",
+                            "TIGER 미국나스닥100", "KODEX 미국나스닥100") if n in R]
+        if etfs:
+            t += " 국내 상장 미국지수 ETF는 " + ", ".join(
+                f"{n.replace('미국', '')} {pct(n)}" for n in etfs) + "입니다."
+        pts.append(t)
+    elif "코스피" in R:
+        pts.append(f"코스피 {pct('코스피')}.")
+    rates = []
+    for n, label in (("미 10년물(%)", "미 10년"), ("미 2년물(%)", "미 2년"),
+                     ("한국 10년물(%)", "한국 10년"), ("한국 2년물(%)", "한국 2년")):
+        if n in R:
+            rates.append(f"{label} {R[n]['value']:.2f}%({bp(n)})")
+    if rates:
+        t = "금리: " + ", ".join(rates) + "."
+        if "미 10년물(%)" in R and "미 2년물(%)" in R:
+            t += f" 미 장단기차(10Y-2Y) {R['미 10년물(%)']['value'] - R['미 2년물(%)']['value']:+.2f}%p."
+        if "한국 10년물(%)" in R and "한국 2년물(%)" in R:
+            t += f" 한국 장단기차 {R['한국 10년물(%)']['value'] - R['한국 2년물(%)']['value']:+.2f}%p."
+        pts.append(t)
+    mood = []
+    if "공포탐욕지수" in R:
+        fg = R["공포탐욕지수"]
+        mood.append(f"공포탐욕지수 {fg['value']:.0f}({fg.get('extra') or '-'}, "
+                    f"전일比 {fg['value'] - fg['prev']:+.0f}pt)")
+    if "VIX" in R:
+        mood.append(f"VIX {R['VIX']['value']:.2f}({pct('VIX')})")
+    if mood:
+        pts.append("심리: " + ", ".join(mood) + ".")
+    com = [f"{label} {pct(n)}" for n, label in (("WTI($)", "WTI"), ("국제 금($/oz)", "국제 금"),
+                                                ("KRX 금(원/g)", "KRX 금")) if n in R]
+    if com:
+        pts.append("원자재: " + ", ".join(com) + ".")
+    kr = [f"{label} {pct(n)}" for n, label in (("코스피", "코스피"), ("원/달러", "원/달러"),
+                                              ("원/엔(100엔)", "원/엔"), ("달러 인덱스", "달러인덱스")) if n in R]
+    if kr:
+        pts.append("한국·환율: " + ", ".join(kr) + ".")
     return "\n".join(f"{i}. {p}" for i, p in enumerate(pts[:5], 1))
 
 
@@ -268,14 +355,19 @@ def claude_points(body, fallback):
         return fallback
     prompt = (
         "아래는 오늘 아침 시장 수치다. 시장 흐름을 한국어로 3~5개 핵심 포인트로 "
-        "간결하게 해석해 줘. 번호 목록만 출력하고, 수치에 없는 사실은 지어내지 마.\n\n" + body
+        "간결하게 해석해 줘. 번호 목록만 출력하고, 수치에 없는 사실은 지어내지 마.\n"
+        "다음 항목은 수치가 있으면 반드시 핵심 포인트 안에 녹여서 언급해 줘: "
+        "(1) 국내 상장 미국지수 ETF 4종(TIGER·KODEX 미국S&P500, 미국나스닥100)의 움직임과 "
+        "해당 미국 지수와의 관계, (2) 공포탐욕지수(VIX와 함께 투자심리), "
+        "(3) 미국·한국 국채 10년물·2년물 금리와 장단기 금리차. "
+        "'조회 실패'로 표시된 항목은 언급하지 마.\n\n" + body
     )
     try:
         r = requests.post(
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": key, "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
-            json={"model": "claude-sonnet-5-5", "max_tokens": 600,
+            json={"model": "claude-sonnet-5-5", "max_tokens": 900,
                   "messages": [{"role": "user", "content": prompt}]},
             timeout=60,
         )
@@ -292,7 +384,7 @@ def build_message():
     for title, lines in sections.items():
         parts.append(f"\n[{title}]\n" + "\n".join(lines))
     body = "\n".join(parts)
-    points = claude_points(body, rule_based_points(changes))
+    points = claude_points(body, rule_based_points(records))
     return body + "\n\n[핵심 포인트]\n" + points, records, points
 
 
