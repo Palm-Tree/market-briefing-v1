@@ -23,6 +23,7 @@ jobs:
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           DATA_GO_KR_KEY: ${{ secrets.DATA_GO_KR_KEY }}        # 선택
+          ECOS_API_KEY: ${{ secrets.ECOS_API_KEY }}            # 선택 (한국 국채금리)
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}  # 선택
       - name: data.json 커밋
         run: |
